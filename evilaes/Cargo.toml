@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 description = "Unsecure AES 256-bit implementation"
 documentation = "https://docs.rs/evilaes"
 repository = "https://github.com/zvavybir/evil"
-readme = "README"
+readme = "README.md"
 keywords = ["crypto"]
 categories = ["cryptography", "dangerous"]
 
