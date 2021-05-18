@@ -1,0 +1,16 @@
+[package]
+name = "evilaes"
+version = "0.1.0"
+edition = "2018"
+authors = ["Matthias Kaak <m.kaak@protonmail.ch>"]
+license = "GPL-3.0-or-later"
+description = "Unsecure AES 256-bit implementation"
+documentation = "https://docs.rs/evilaes"
+repository = "https://github.com/zvavybir/evil"
+readme = "README"
+keywords = ["crypto"]
+categories = ["cryptography", "dangerous"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
