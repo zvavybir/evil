@@ -16,21 +16,69 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#![warn(
+    missing_docs,
+    missing_debug_implementations,
+    missing_copy_implementations,
+    trivial_casts,
+    trivial_numeric_casts,
+    unsafe_code,
+    unstable_features,
+    unused_import_braces,
+    unused_qualifications,
+    rustdoc::missing_crate_level_docs,
+    rust_2018_idioms,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+#![allow(
+    clippy::suspicious_else_formatting,
+    clippy::match_like_matches_macro,
+    // (Hopefully) always manual checked
+    clippy::cast_lossless,
+    // (Hopefully) always manual checked
+    clippy::cast_possible_truncation,
+    // Impossible to fulfil in crypto code
+    clippy::unreadable_literal
+)]
+
+//! Unsecure implementation of SHA 2 in pure rust
+//!
+//! evilaes is a implementation of SHA 2 written by an amateur
+//! for the sole purpose that he learns a bit about cryptography.  It
+//! is very probably *very* vulnerable, so **do not use evilsha**.
+//! The same applies to all other evil\* crates.
+
 use std::num::Wrapping;
 
+/// Version token for evilsha
+///
+/// Specifies which version of SHA evilsha should use. **The best version is
+/// none!**
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ShaVersion
 {
+    /// SHA 256-bit
     Sha256,
+    /// SHA 384-bit
     Sha384,
+    /// SHA 512-bit
     Sha512,
 }
 
+/// Return value for evilsha
+///
+/// Saves the return value for evilsha.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ShaHash
 {
+    /// Return value for SHA 256-bit
     Sha256([u8; 32]),
+    /// Return value for SHA 384-bit
     Sha384([u8; 48]),
+    /// Return value for SHA 512-bit
     Sha512([u8; 64]),
 }
 
@@ -38,7 +86,7 @@ struct PaddingWrapper256<'a>(&'a [u8]);
 
 impl<'a> PaddingWrapper256<'a>
 {
-    fn get(&self, i: usize) -> u8
+    const fn get(&self, i: usize) -> u8
     {
         let mut amount_pad = 120 - ((self.0.len() + 1) % 64);
         if amount_pad >= 64
@@ -99,7 +147,7 @@ struct PaddingWrapper512<'a>(&'a [u8]);
 
 impl<'a> PaddingWrapper512<'a>
 {
-    fn get(&self, i: usize) -> u8
+    const fn get(&self, i: usize) -> u8
     {
         let mut amount_pad = 240 - ((self.0.len() + 1) % 128);
         if amount_pad >= 128
@@ -160,7 +208,7 @@ fn sha_512_pad(mes: &[u8]) -> Vec<[u64; 16]>
     rv
 }
 
-pub fn sha_256(mes: &[[u32; 16]]) -> [u8; 32]
+fn sha_256(mes: &[[u32; 16]]) -> [u8; 32]
 {
     let mut hs: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f,
@@ -260,7 +308,7 @@ pub fn sha_256(mes: &[[u32; 16]]) -> [u8; 32]
     rv
 }
 
-pub fn sha_512(mes: &[[u64; 16]], version: ShaVersion) -> ShaHash
+fn sha_512(mes: &[[u64; 16]], version: ShaVersion) -> ShaHash
 {
     assert_ne!(version, ShaVersion::Sha256, "Use `sha_256` for 256 bit");
 
@@ -490,6 +538,12 @@ pub fn sha_512(mes: &[[u64; 16]], version: ShaVersion) -> ShaHash
     }
 }
 
+/// SHA 2 implementation
+///
+/// An **unsecure** implementation of SHA 2.  **DO NOT USE!**
+///
+/// Specify with a [`ShaVersion`] token which SHA 2 version you want.
+#[must_use]
 pub fn sha_2(mes: &[u8], version: ShaVersion) -> ShaHash
 {
     match version
