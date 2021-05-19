@@ -1,11 +1,11 @@
 [package]
-name = "evilaes"
+name = "evilsha"
 version = "0.1.0"
 edition = "2018"
 authors = ["Matthias Kaak <m.kaak@protonmail.ch>"]
 license = "GPL-3.0-or-later"
-description = "Unsecure AES 256-bit implementation"
-documentation = "https://docs.rs/evilaes"
+description = "Unsecure SHA 2 implementation"
+documentation = "https://docs.rs/evilsha"
 repository = "https://github.com/zvavybir/evil"
 readme = "README.md"
 keywords = ["crypto"]
