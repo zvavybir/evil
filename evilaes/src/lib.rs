@@ -278,6 +278,160 @@ static AES_256_RCON: [u8; 256] = [
     0x74, 0xe8, 0xcb, 0x8d,
 ];
 
+/// AES 256 stream cipher mode
+///
+/// Stream ciphers like [`Aes256Encrypt`] can be used in different
+/// modes.  Through this enum you can choose which one you want
+///
+/// # Cryptological Saftey
+/// It's **not** safe!  Do **not** use it!
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Aes256StreamMode
+{
+    /// Just a simple, block cipher-like mode
+    Simple,
+    /// Uses Galois/Counter Mode
+    GCM,
+}
+
+/// AES stream cipher; encrypting
+///
+/// AES can be used a stream cipher and this exposes this
+/// functionality.  Call [`Aes256Encrypt::new(key,
+/// mode)`](Aes256Encrypt::new) to start it and then you can encrypt
+/// single blocks.
+///
+/// # Cryptological Saftey
+/// It's **not** safe!  Do **not** use it!
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Aes256Encrypt
+{
+    key: [[u8; 4]; AES_256_NB * (AES_256_NR + 1)],
+    mode: Aes256StreamMode,
+}
+
+/// AES stream cipher; decrypting
+///
+/// AES can be used a stream cipher and this exposes this
+/// functionality.  Call [`Aes256Decrypt::new(key,
+/// mode)`](Aes256Decrypt::new) to start it and then you can encrypt
+/// single blocks.
+///
+/// # Cryptological Saftey
+/// It's **not** safe!  Do **not** use it!
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Aes256Decrypt
+{
+    key: [[u8; 4]; AES_256_NB * (AES_256_NR + 1)],
+    mode: Aes256StreamMode,
+}
+
+impl Drop for Aes256Encrypt
+{
+    fn drop(&mut self)
+    {
+        delete_key(self.key);
+    }
+}
+
+impl Drop for Aes256Decrypt
+{
+    fn drop(&mut self)
+    {
+        delete_key(self.key);
+    }
+}
+
+impl Aes256Encrypt
+{
+    /// Creates a new insecure encrypting AES stream cipher
+    ///
+    /// Creates a new encrypting AES stream cipher and tries to delete
+    /// the key.  **Neither** this **nor** the general implementation
+    /// is **secure**.
+    #[must_use]
+    pub fn new(key: [u8; AES_256_NK * 4], mode: Aes256StreamMode) -> Self
+    {
+        let rv = Self {
+            key: aes_256_key_expansion(&key),
+            mode,
+        };
+
+        delete_key(key);
+
+        rv
+    }
+
+    /// Encrypts insecurely one block as part of the stream cipher
+    ///
+    /// Encrypts insecurely one block as part of the given stream
+    /// cipher.  **Note:** This is **not** secure!
+    ///
+    /// # Panics
+    /// Panics if an not yet implemented stream cipher mode was specified
+    pub fn encrypt_block(&mut self, block: &mut [[u8; 4]; 4])
+    {
+        match self.mode
+        {
+            Aes256StreamMode::Simple =>
+            {
+                aes_256_block_encrypt(block, &self.key)
+            }
+            Aes256StreamMode::GCM => todo!(),
+        }
+    }
+}
+
+impl Aes256Decrypt
+{
+    /// Creates a new insecure decrypting AES stream cipher
+    ///
+    /// Creates a new decrypting AES stream cipher and tries to delete
+    /// the key.  **Neither** this **nor** the general implementation
+    /// is **secure**.
+    #[must_use]
+    pub fn new(key: [u8; AES_256_NK * 4], mode: Aes256StreamMode) -> Self
+    {
+        let rv = Self {
+            key: aes_256_key_expansion(&key),
+            mode,
+        };
+
+        delete_key(key);
+
+        rv
+    }
+
+    /// Decrypts insecurely one block as part of the stream cipher
+    ///
+    /// Decrypts insecurely one block as part of the given stream
+    /// cipher.  **Note:** This is **not** secure!
+    ///
+    /// # Panics
+    /// Panics if an not yet implemented stream cipher mode was specified
+    pub fn decrypt_block(&mut self, block: &mut [[u8; 4]; 4])
+    {
+        match self.mode
+        {
+            Aes256StreamMode::Simple =>
+            {
+                aes_256_block_decrypt(block, &self.key)
+            }
+            Aes256StreamMode::GCM => todo!(),
+        }
+    }
+}
+
+fn delete_key<T, const N: usize>(mut key: [T; N])
+{
+    // FIXME: Try find a non-unsafe, non-instrinsics,
+    // non-feature-gated version!
+    #[allow(unsafe_code)]
+    unsafe {
+        std::intrinsics::volatile_set_memory(&mut key as *mut T, 0, N);
+    }
+}
+
 fn aes_256_sub_bytes(state: &mut [[u8; 4]; 4])
 {
     for row in state.iter_mut()
@@ -552,7 +706,7 @@ fn aes_256_block_decrypt(
 #[must_use]
 fn aes_256_crypt(
     input: &[u8],
-    mut key: [u8; AES_256_NK * 4],
+    key: [u8; AES_256_NK * 4],
     block_crypter: &dyn Fn(
         &mut [[u8; 4]; 4],
         &[[u8; 4]; (AES_256_NR + 1) * 4],
@@ -587,22 +741,8 @@ fn aes_256_crypt(
         }
     }
 
-    let mut longkey = longkey;
-
-    // FIXME: Try find a non-unsafe, non-instrinsics, non-feature-gate version
-    #[allow(unsafe_code)]
-    unsafe {
-        std::intrinsics::volatile_set_memory(
-            &mut key as *mut u8,
-            0,
-            AES_256_NK * 4,
-        );
-        std::intrinsics::volatile_set_memory(
-            &mut longkey as *mut [u8; 4],
-            0,
-            AES_256_NB * (AES_256_NR + 1),
-        );
-    }
+    delete_key(key);
+    delete_key(longkey);
 
     output
 }
@@ -734,7 +874,6 @@ mod tests
     #[test]
     fn all_test()
     {
-        use crate::AES_256_NB;
         use crate::{aes_256_decrypt, aes_256_encrypt};
 
         assert_eq!(
