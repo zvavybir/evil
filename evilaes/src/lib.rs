@@ -48,6 +48,7 @@
 //! The same applies to all other evil\* crates.
 
 use std::convert::TryInto;
+use std::sync::atomic::{fence, Ordering};
 
 const AES_256_NK: usize = 8;
 const AES_256_NB: usize = 4;
@@ -430,6 +431,8 @@ fn delete_key<T, const N: usize>(mut key: [T; N])
     unsafe {
         std::intrinsics::volatile_set_memory(&mut key as *mut T, 0, N);
     }
+
+    fence(Ordering::SeqCst);
 }
 
 fn aes_256_sub_bytes(state: &mut [[u8; 4]; 4])
