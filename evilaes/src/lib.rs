@@ -48,6 +48,8 @@
 //! The same applies to all other evil\* crates.
 
 use std::convert::TryInto;
+use std::error;
+use std::fmt;
 use std::sync::atomic::{fence, Ordering};
 
 const AES_256_NK: usize = 8;
@@ -279,6 +281,14 @@ static AES_256_RCON: [u8; 256] = [
     0x74, 0xe8, 0xcb, 0x8d,
 ];
 
+/// Errors in AES encryption
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AesError
+{
+    /// The given buffer couldn't be split in a whole number of blocks
+    NotWholeBlock,
+}
+
 /// AES 256 stream cipher mode
 ///
 /// Stream ciphers like [`Aes256Encrypt`] can be used in different
@@ -342,6 +352,22 @@ impl Drop for Aes256Decrypt
         delete_key(self.key);
     }
 }
+
+impl fmt::Display for AesError
+{
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error>
+    {
+        match self
+        {
+            AesError::NotWholeBlock => write!(
+                fmt,
+                "The buffer couldn't be split in a whole number of blocks"
+            ),
+        }
+    }
+}
+
+impl error::Error for AesError {}
 
 impl Aes256Encrypt
 {
@@ -714,7 +740,7 @@ fn aes_256_crypt(
         &mut [[u8; 4]; 4],
         &[[u8; 4]; (AES_256_NR + 1) * 4],
     ),
-) -> Vec<u8>
+) -> Result<Vec<u8>, AesError>
 {
     let mut output = Vec::with_capacity(((input.len() + 1) / 16) * 16);
     let longkey = aes_256_key_expansion(&key);
@@ -723,8 +749,7 @@ fn aes_256_crypt(
     {
         if block.len() != (AES_256_NB * 4)
         {
-            // TODO: What should happen here?
-            continue;
+            return Err(AesError::NotWholeBlock);
         }
         let mut block = [
             block[0..4].try_into().unwrap(),
@@ -747,7 +772,7 @@ fn aes_256_crypt(
     delete_key(key);
     delete_key(longkey);
 
-    output
+    Ok(output)
 }
 
 /// Encrypts using AES-256
@@ -763,7 +788,10 @@ fn aes_256_crypt(
 /// do *not* rely on it being safe!  Moreover there are probably
 /// countless **futher** issues.
 #[must_use]
-pub fn aes_256_encrypt(input: &[u8], key: [u8; AES_256_NK * 4]) -> Vec<u8>
+pub fn aes_256_encrypt(
+    input: &[u8],
+    key: [u8; AES_256_NK * 4],
+) -> Result<Vec<u8>, AesError>
 {
     aes_256_crypt(input, key, &aes_256_block_encrypt)
 }
@@ -781,7 +809,10 @@ pub fn aes_256_encrypt(input: &[u8], key: [u8; AES_256_NK * 4]) -> Vec<u8>
 /// do *not* rely on it being safe!  Moreover there are probably
 /// countless **futher** issues.
 #[must_use]
-pub fn aes_256_decrypt(input: &[u8], key: [u8; AES_256_NK * 4]) -> Vec<u8>
+pub fn aes_256_decrypt(
+    input: &[u8],
+    key: [u8; AES_256_NK * 4],
+) -> Result<Vec<u8>, AesError>
 {
     aes_256_crypt(input, key, &aes_256_block_decrypt)
 }
@@ -892,14 +923,16 @@ mod tests
                         0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a,
                         0x1b, 0x1c, 0x1d, 0x1e, 0x1f
                     ]
-                ),
+                )
+                .unwrap(),
                 [
                     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
                     0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,
                     0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a,
                     0x1b, 0x1c, 0x1d, 0x1e, 0x1f
                 ]
-            ),
+            )
+            .unwrap(),
             [
                 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
                 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff
