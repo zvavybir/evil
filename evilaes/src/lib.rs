@@ -36,9 +36,19 @@
 #![allow(
     clippy::suspicious_else_formatting,
     clippy::match_like_matches_macro,
-    unstable_features
+    unstable_features,
+    // Needed so I can name the variables like the specification
+    clippy::many_single_char_names,
+    // Should be correct everywhere already.
+    clippy::cast_possible_truncation,
+    // Should be correct everywhere already.
+    clippy::cast_lossless
 )]
 #![feature(core_intrinsics)]
+// Needed against timing attacks; I could reimplement it, but would
+// need assembler for that which is itself behind a feature gate so it
+// wouldn't be an improvement.
+#![feature(bench_black_box)]
 
 //! Unsecure implementation of AES 256 in pure rust
 //!
@@ -50,7 +60,13 @@
 use std::convert::TryInto;
 use std::error;
 use std::fmt;
+use std::hint::black_box;
+use std::io;
+use std::iter;
+use std::num::Wrapping;
 use std::sync::atomic::{fence, Ordering};
+
+use evilrng::RngSource;
 
 const AES_256_NK: usize = 8;
 const AES_256_NB: usize = 4;
@@ -287,70 +303,10 @@ pub enum AesError
 {
     /// The given buffer couldn't be split in a whole number of blocks
     NotWholeBlock,
-}
-
-/// AES 256 stream cipher mode
-///
-/// Stream ciphers like [`Aes256Encrypt`] can be used in different
-/// modes.  Through this enum you can choose which one you want
-///
-/// # Cryptological Saftey
-/// It's **not** safe!  Do **not** use it!
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Aes256StreamMode
-{
-    /// Just a simple, block cipher-like mode
-    Simple,
-    /// Uses Galois/Counter Mode
-    GCM,
-}
-
-/// AES stream cipher; encrypting
-///
-/// AES can be used a stream cipher and this exposes this
-/// functionality.  Call [`Aes256Encrypt::new(key,
-/// mode)`](Aes256Encrypt::new) to start it and then you can encrypt
-/// single blocks.
-///
-/// # Cryptological Saftey
-/// It's **not** safe!  Do **not** use it!
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Aes256Encrypt
-{
-    key: [[u8; 4]; AES_256_NB * (AES_256_NR + 1)],
-    mode: Aes256StreamMode,
-}
-
-/// AES stream cipher; decrypting
-///
-/// AES can be used a stream cipher and this exposes this
-/// functionality.  Call [`Aes256Decrypt::new(key,
-/// mode)`](Aes256Decrypt::new) to start it and then you can encrypt
-/// single blocks.
-///
-/// # Cryptological Saftey
-/// It's **not** safe!  Do **not** use it!
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Aes256Decrypt
-{
-    key: [[u8; 4]; AES_256_NB * (AES_256_NR + 1)],
-    mode: Aes256StreamMode,
-}
-
-impl Drop for Aes256Encrypt
-{
-    fn drop(&mut self)
-    {
-        delete_key(self.key);
-    }
-}
-
-impl Drop for Aes256Decrypt
-{
-    fn drop(&mut self)
-    {
-        delete_key(self.key);
-    }
+    /// In decrypting AES using Galois/Counter Mode a verification
+    /// error occured.  In technical documents this is know as
+    /// \"FAIL\".
+    VerifyingError,
 }
 
 impl fmt::Display for AesError
@@ -363,91 +319,15 @@ impl fmt::Display for AesError
                 fmt,
                 "The buffer couldn't be split in a whole number of blocks"
             ),
+            AesError::VerifyingError =>
+            {
+                write!(fmt, "Authentication tag couldn't be verified")
+            }
         }
     }
 }
 
 impl error::Error for AesError {}
-
-impl Aes256Encrypt
-{
-    /// Creates a new insecure encrypting AES stream cipher
-    ///
-    /// Creates a new encrypting AES stream cipher and tries to delete
-    /// the key.  **Neither** this **nor** the general implementation
-    /// is **secure**.
-    #[must_use]
-    pub fn new(key: [u8; AES_256_NK * 4], mode: Aes256StreamMode) -> Self
-    {
-        let rv = Self {
-            key: aes_256_key_expansion(&key),
-            mode,
-        };
-
-        delete_key(key);
-
-        rv
-    }
-
-    /// Encrypts insecurely one block as part of the stream cipher
-    ///
-    /// Encrypts insecurely one block as part of the given stream
-    /// cipher.  **Note:** This is **not** secure!
-    ///
-    /// # Panics
-    /// Panics if an not yet implemented stream cipher mode was specified
-    pub fn encrypt_block(&mut self, block: &mut [[u8; 4]; 4])
-    {
-        match self.mode
-        {
-            Aes256StreamMode::Simple =>
-            {
-                aes_256_block_encrypt(block, &self.key)
-            }
-            Aes256StreamMode::GCM => todo!(),
-        }
-    }
-}
-
-impl Aes256Decrypt
-{
-    /// Creates a new insecure decrypting AES stream cipher
-    ///
-    /// Creates a new decrypting AES stream cipher and tries to delete
-    /// the key.  **Neither** this **nor** the general implementation
-    /// is **secure**.
-    #[must_use]
-    pub fn new(key: [u8; AES_256_NK * 4], mode: Aes256StreamMode) -> Self
-    {
-        let rv = Self {
-            key: aes_256_key_expansion(&key),
-            mode,
-        };
-
-        delete_key(key);
-
-        rv
-    }
-
-    /// Decrypts insecurely one block as part of the stream cipher
-    ///
-    /// Decrypts insecurely one block as part of the given stream
-    /// cipher.  **Note:** This is **not** secure!
-    ///
-    /// # Panics
-    /// Panics if an not yet implemented stream cipher mode was specified
-    pub fn decrypt_block(&mut self, block: &mut [[u8; 4]; 4])
-    {
-        match self.mode
-        {
-            Aes256StreamMode::Simple =>
-            {
-                aes_256_block_decrypt(block, &self.key)
-            }
-            Aes256StreamMode::GCM => todo!(),
-        }
-    }
-}
 
 fn delete_key<T, const N: usize>(mut key: [T; N])
 {
@@ -732,7 +612,6 @@ fn aes_256_block_decrypt(
     aes_256_add_round_key(state, &expkey[keyi..(keyi + 4)]);
 }
 
-#[must_use]
 fn aes_256_crypt(
     input: &[u8],
     key: [u8; AES_256_NK * 4],
@@ -775,19 +654,390 @@ fn aes_256_crypt(
     Ok(output)
 }
 
+/// Gets a IV insecurely
+///
+/// Using AES GCM needs an initialisation vector (IV for short).  This
+/// creates a new one, using the cryptographical insecure `evilrng`
+/// crate, so **do not use!**
+///
+/// You need to provide a [`RngSource`](evilrng::RngSource):
+/// ```no_run
+/// # use evilrng;
+/// # use evilaes::aes_get_iv;
+/// # fn main() -> Result<(), std::io::Error>
+/// # {
+/// // Since just zeros is theoretical possible, that fails with a
+/// // possibility of 2^(-72)
+/// assert_ne!(aes_get_iv(&mut evilrng::RngSource::new()?)?, [0, 0, 0]);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+/// It returns an error if no entropy could be read.
+pub fn aes_get_iv(rng: &mut RngSource) -> Result<[u32; 3], io::Error>
+{
+    Ok([rng.get_u32()?, rng.get_u32()?, rng.get_u32()?])
+}
+
+// A few helper functions; I think I see another reason, why you
+// should implement crypto multiple times :)
+
+const fn u64_as_array(v: u64) -> [u8; 8]
+{
+    [
+        (v >> 56) as u8,
+        ((v >> 48) % 256) as u8,
+        ((v >> 40) % 256) as u8,
+        ((v >> 32) % 256) as u8,
+        ((v >> 24) % 256) as u8,
+        ((v >> 16) % 256) as u8,
+        ((v >> 8) % 256) as u8,
+        (v % 256) as u8,
+    ]
+}
+
+const fn flatten_output(state: &[[u8; 4]; 4]) -> [u8; 16]
+{
+    [
+        state[0][0],
+        state[0][1],
+        state[0][2],
+        state[0][3],
+        state[1][0],
+        state[1][1],
+        state[1][2],
+        state[1][3],
+        state[2][0],
+        state[2][1],
+        state[2][2],
+        state[2][3],
+        state[3][0],
+        state[3][1],
+        state[3][2],
+        state[3][3],
+    ]
+}
+
+fn galois_product(x: u128, y: u128) -> u128
+{
+    let mut z = 0;
+    let mut v = y;
+
+    for i in 0..128
+    {
+        // Should be timing-attack resistant
+
+        z ^= if x & (1 << (127 - i)) == 0
+        {
+            black_box(0)
+        }
+        else
+        {
+            black_box(v)
+        };
+
+        v = (v >> 1)
+            ^ if (v % 2) == 0
+            {
+                black_box(0)
+            }
+            else
+            {
+                black_box(0xE100_0000_0000_0000_0000_0000_0000_0000)
+            };
+    }
+
+    z
+}
+
+fn ghash(subkey_: &[[u8; 4]; 4], input: &[u8]) -> u128
+{
+    let mut subkey = 0;
+    let mut chunks = Vec::with_capacity((input.len() + 15) / 16);
+
+    for i in 0..16
+    {
+        subkey *= 256;
+        subkey += subkey_[i / 4][i % 4] as u128;
+    }
+
+    for chunk in input.chunks(16)
+    {
+        assert_eq!(chunk.len(), 16);
+
+        let mut val = 0;
+
+        for v in chunk
+        {
+            val *= 256;
+            val += *v as u128;
+        }
+
+        chunks.push(val);
+    }
+
+    let mut y = 0;
+
+    for chunk in chunks
+    {
+        y = galois_product(y ^ chunk, subkey);
+    }
+
+    y
+}
+
+fn gctr(
+    longkey: &[[u8; 4]; AES_256_NB * (AES_256_NR + 1)],
+    icb_: &[u32; 4],
+    input: &[u8],
+) -> Vec<u8>
+{
+    if input.is_empty()
+    {
+        return vec![];
+    }
+
+    let mut icb = [[0; 4]; 4];
+
+    for i in 0..4
+    {
+        icb[i][0] = (icb_[i] >> 24) as u8;
+        icb[i][1] = ((icb_[i] >> 16) % 256) as u8;
+        icb[i][2] = ((icb_[i] >> 8) % 256) as u8;
+        icb[i][3] = (icb_[i] % 256) as u8;
+    }
+
+    let n = ((input.len() * 8) + 127) / 128;
+    let mut lastlen = 0;
+
+    let mut chunks = Vec::with_capacity(n);
+
+    for chunk in input.chunks(16)
+    {
+        let mut sum = [[0; 4]; 4];
+
+        lastlen = chunk.len();
+
+        // TODO: Determine if timing-attack possible
+        for i in 0..16
+        {
+            if chunk.len() > i
+            {
+                sum[i / 4][i % 4] = chunk[i];
+            }
+        }
+
+        chunks.push(sum);
+    }
+
+    let mut last_cb = [[0_u8; 4]; 4];
+    let mut rv: Vec<u8> = Vec::with_capacity(input.len());
+
+    for (i, chunk) in chunks.iter().enumerate()
+    {
+        let mut cb = if i == 0
+        {
+            icb
+        }
+        else
+        {
+            let mut tmp = last_cb;
+            tmp[3][3] = (Wrapping(tmp[3][3]) + Wrapping(1)).0;
+            tmp
+        };
+
+        last_cb = cb;
+
+        aes_256_block_encrypt(&mut cb, longkey);
+        // Since that's not possible:
+        // let y = chunk ^ cb;
+        // So:
+        let mut y = [[0; 4]; 4];
+        for j in 0..16
+        {
+            y[j / 4][j % 4] = chunk[j / 4][j % 4] ^ cb[j / 4][j % 4];
+        }
+
+        if i == n - 1
+        {
+            for i in 0..lastlen
+            {
+                rv.push(y[i / 4][i % 4])
+            }
+        }
+        else
+        {
+            for v in flatten_output(&y)
+            {
+                rv.push(v);
+            }
+        }
+    }
+
+    rv
+}
+
+/// Encrypts insecurely via AES-256 bit GCM
+///
+/// This encrypts `input` and authenticates `input` and `aad`
+/// **insecurely** via AES-256 bit Galois/Counter Mode using `key` and
+/// `iv`.  This is not cryptographical secure, **do not use!**
+#[must_use]
+pub fn aes_256_gcm_encrypt(
+    input: &[u8],
+    aad: &[u8],
+    key: [u8; AES_256_NK * 4],
+    iv: [u32; 3],
+) -> (Vec<u8>, [u32; 4])
+{
+    let longkey = aes_256_key_expansion(&key);
+    let mut h = [[0; 4]; 4];
+    aes_256_block_encrypt(&mut h, &longkey);
+
+    let j = [iv[0], iv[1], iv[2], 1];
+    let j_inc = [iv[0], iv[1], iv[2], 2];
+    let c = gctr(&longkey, &j_inc, input);
+    let u = ((c.len() + 15) / 16) * 128 - c.len() * 8;
+    let v = ((aad.len() + 15) / 16) * 128 - aad.len() * 8;
+    let pre_s = aad
+        .iter()
+        .copied()
+        .chain(iter::repeat(0).take(v))
+        .chain(c.iter().copied())
+        .chain(iter::repeat(0).take(u))
+        .chain(u64_as_array((aad.len() * 8) as u64).iter().copied())
+        .chain(u64_as_array((c.len() * 8) as u64).iter().copied())
+        .collect::<Vec<_>>();
+    let s = ghash(&h, &pre_s);
+    let s = [
+        (s >> 120) as u8,
+        ((s >> 112) % 256) as u8,
+        ((s >> 104) % 256) as u8,
+        ((s >> 96) % 256) as u8,
+        ((s >> 88) % 256) as u8,
+        ((s >> 80) % 256) as u8,
+        ((s >> 72) % 256) as u8,
+        ((s >> 64) % 256) as u8,
+        ((s >> 56) % 256) as u8,
+        ((s >> 48) % 256) as u8,
+        ((s >> 40) % 256) as u8,
+        ((s >> 32) % 256) as u8,
+        ((s >> 24) % 256) as u8,
+        ((s >> 16) % 256) as u8,
+        ((s >> 8) % 256) as u8,
+        (s % 256) as u8,
+    ];
+    let t_ = gctr(&longkey, &j, &s);
+    let mut t = [0; 4];
+
+    for i in 0..4
+    {
+        t[i] = ((t_[i * 4] as u32) << 24)
+            + ((t_[i * 4 + 1] as u32) << 16)
+            + ((t_[i * 4 + 2] as u32) << 8)
+            + (t_[i * 4 + 3] as u32);
+    }
+
+    delete_key(key);
+    delete_key(longkey);
+
+    (c, t)
+}
+
+/// Decrypts insecurely via AES-256 bit GCM
+///
+/// This decrypts `input` and authenticates `input` and `aad`
+/// **insecurely** via AES-256 bit Galois/Counter Mode using `key` and
+/// `iv`.  This is not cryptographical secure, **do not use!**
+///
+/// # Errors
+/// Returns an error if the verification couldn't succeeds.  **Note:**
+/// This is **not** cryptographical **secure**.  **Do not** rely one
+/// the correctness of the verification.
+pub fn aes_256_gcm_decrypt(
+    c: &[u8],
+    aad: &[u8],
+    key: [u8; AES_256_NK * 4],
+    iv: [u32; 3],
+    tag: [u32; 4],
+) -> Result<Vec<u8>, AesError>
+{
+    let longkey = aes_256_key_expansion(&key);
+    let mut h = [[0; 4]; 4];
+    aes_256_block_encrypt(&mut h, &longkey);
+
+    let j = [iv[0], iv[1], iv[2], 1];
+    let j_inc = [iv[0], iv[1], iv[2], 2];
+    let p = gctr(&longkey, &j_inc, c);
+    let u = ((c.len() + 15) / 16) * 128 - c.len() * 8;
+    let v = ((aad.len() + 15) / 16) * 128 - aad.len() * 8;
+    let pre_s = aad
+        .iter()
+        .copied()
+        .chain(iter::repeat(0).take(v))
+        .chain(c.iter().copied())
+        .chain(iter::repeat(0).take(u))
+        .chain(u64_as_array((aad.len() * 8) as u64).iter().copied())
+        .chain(u64_as_array((c.len() * 8) as u64).iter().copied())
+        .collect::<Vec<_>>();
+    let s = ghash(&h, &pre_s);
+    let s = [
+        (s >> 120) as u8,
+        ((s >> 112) % 256) as u8,
+        ((s >> 104) % 256) as u8,
+        ((s >> 96) % 256) as u8,
+        ((s >> 88) % 256) as u8,
+        ((s >> 80) % 256) as u8,
+        ((s >> 72) % 256) as u8,
+        ((s >> 64) % 256) as u8,
+        ((s >> 56) % 256) as u8,
+        ((s >> 48) % 256) as u8,
+        ((s >> 40) % 256) as u8,
+        ((s >> 32) % 256) as u8,
+        ((s >> 24) % 256) as u8,
+        ((s >> 16) % 256) as u8,
+        ((s >> 8) % 256) as u8,
+        (s % 256) as u8,
+    ];
+    let t_ = gctr(&longkey, &j, &s);
+    let mut t = [0; 4];
+
+    for i in 0..4
+    {
+        t[i] = ((t_[i * 4] as u32) << 24)
+            + ((t_[i * 4 + 1] as u32) << 16)
+            + ((t_[i * 4 + 2] as u32) << 8)
+            + (t_[i * 4 + 3] as u32);
+    }
+
+    delete_key(key);
+    delete_key(longkey);
+
+    if t == tag
+    {
+        Ok(p)
+    }
+    else
+    {
+        Err(AesError::VerifyingError)
+    }
+}
+
 /// Encrypts using AES-256
 ///
 /// Encrypts `input` using `key` and returns the cipher text.  If not
-/// a whole number of 16-byte blocks are supplied the last,
-/// not-complete block will be discarded.  This behavior might be
-/// subject to change.
+/// a whole number of 16-byte blocks are supplied an error will be
+/// returned.
 ///
 /// **Note**: The function takes ownership of the
-/// key and overrites it with zeros **only** on a **best effort**
+/// key and overwrites it with zeros **only** on a **best effort**
 /// basis, and I'm not a cryptographer so this is probably **insecure**,
 /// do *not* rely on it being safe!  Moreover there are probably
 /// countless **futher** issues.
-#[must_use]
+///
+/// # Errors
+/// Returns an error if not a whole number of blocks was provided.
 pub fn aes_256_encrypt(
     input: &[u8],
     key: [u8; AES_256_NK * 4],
@@ -799,16 +1049,17 @@ pub fn aes_256_encrypt(
 /// Decrypts using AES-256
 ///
 /// Decrypts `input` using `key` and returns the cipher text.  If not
-/// a whole number of 16-byte blocks are supplied the last,
-/// not-complete block will be discarded.  This behavior might be
-/// subject to change.
+/// a whole number of 16-byte blocks are supplied an error will be
+/// returned.
 ///
 /// **Note**: The function takes ownership of the
-/// key and overrites it with zeros **only** on a **best effort**
+/// key and overwrites it with zeros **only** on a **best effort**
 /// basis, and I'm not a cryptographer so this is probably **insecure**,
 /// do *not* rely on it being safe!  Moreover there are probably
 /// countless **futher** issues.
-#[must_use]
+///
+/// # Errors
+/// Returns an error if not a whole number of blocks was provided.
 pub fn aes_256_decrypt(
     input: &[u8],
     key: [u8; AES_256_NK * 4],
@@ -906,7 +1157,7 @@ mod tests
     }
 
     #[test]
-    fn all_test()
+    fn aes_test()
     {
         use crate::{aes_256_decrypt, aes_256_encrypt};
 
@@ -939,5 +1190,73 @@ mod tests
             ]
         );
         assert_eq!(2 + 2, 4);
+    }
+
+    #[test]
+    fn galois_test()
+    {
+        for i in 10000..10500
+        {
+            for j in 120..260
+            {
+                assert_eq!(galois_product(i, j), galois_product(j, i));
+            }
+        }
+        assert_eq!(
+            galois_product(45 ^ 34, 76),
+            galois_product(45, 76) ^ galois_product(34, 76)
+        );
+
+        let mut val = 87;
+
+        for _ in 0..128
+        {
+            val = galois_product(val, val);
+        }
+
+        assert_eq!(val, 87);
+
+        assert_eq!(
+            galois_product(
+                0x0388DACE60B6A392F328C2B971B2FE78,
+                0x66E94BD4EF8A2C3B884CFA59CA342B2E
+            ),
+            0x5E2EC746917062882C85B0685353DEB7
+        );
+    }
+
+    #[test]
+    fn gcm_test()
+    {
+        let p = vec![
+            0xd9, 0x31, 0x32, 0x25, 0xf8, 0x84, 0x06, 0xe5, 0xa5, 0x59, 0x09,
+            0xc5, 0xaf, 0xf5, 0x26, 0x9a, 0x86, 0xa7, 0xa9, 0x53, 0x15, 0x34,
+            0xf7, 0xda, 0x2e, 0x4c, 0x30, 0x3d, 0x8a, 0x31, 0x8a, 0x72, 0x1c,
+            0x3c, 0x0c, 0x95, 0x95, 0x68, 0x09, 0x53, 0x2f, 0xcf, 0x0e, 0x24,
+            0x49, 0xa6, 0xb5, 0x25, 0xb1, 0x6a, 0xed, 0xf5, 0xaa, 0x0d, 0xe6,
+            0x57, 0xba, 0x63, 0x7b, 0x39, 0x1a, 0xaf, 0xd2, 0x55,
+        ];
+        let key = [
+            0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f,
+            0x94, 0x67, 0x30, 0x83, 0x08, 0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65,
+            0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30, 0x83, 0x08,
+        ];
+        let iv = [0xcafebabe, 0xfacedbad, 0xdecaf888];
+        let c = vec![
+            0x52, 0x2d, 0xc1, 0xf0, 0x99, 0x56, 0x7d, 0x07, 0xf4, 0x7f, 0x37,
+            0xa3, 0x2a, 0x84, 0x42, 0x7d, 0x64, 0x3a, 0x8c, 0xdc, 0xbf, 0xe5,
+            0xc0, 0xc9, 0x75, 0x98, 0xa2, 0xbd, 0x25, 0x55, 0xd1, 0xaa, 0x8c,
+            0xb0, 0x8e, 0x48, 0x59, 0x0d, 0xbb, 0x3d, 0xa7, 0xb0, 0x8b, 0x10,
+            0x56, 0x82, 0x88, 0x38, 0xc5, 0xf6, 0x1e, 0x63, 0x93, 0xba, 0x7a,
+            0x0a, 0xbc, 0xc9, 0xf6, 0x62, 0x89, 0x80, 0x15, 0xad,
+        ];
+        let tag = [0xb094dac5, 0xd93471bd, 0xec1a5022, 0x70e3cc6c];
+        let wrongtag = [0xb094dac5, 0xd92471bd, 0xec1a5022, 0x70e3cc6c];
+        assert_eq!(aes_256_gcm_encrypt(&p, &[], key, iv), (c.clone(), tag));
+        assert_eq!(aes_256_gcm_decrypt(&c, &[], key, iv, tag), Ok(p));
+        assert_eq!(
+            aes_256_gcm_decrypt(&c, &[], key, iv, wrongtag),
+            Err(AesError::VerifyingError)
+        );
     }
 }
