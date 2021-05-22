@@ -1,5 +1,5 @@
 /*
- * evilaes – Unsecure random number source
+ * evilrng – Unsecure random number source
  * Copyright (C) 2021 Matthias Kaak
  *
  * This program is free software: you can redistribute it and/or modify
@@ -37,29 +37,53 @@
 
 //! Unsecure random number source in pure rust
 //!
-//! evilrng provides a unsecure source of cryptographical secure rando
-//! mnumber and is written by an amateur for the sole purpose that he
-//! learns a bit about cryptography.  It is very probably *very*
-//! vulnerable, so **do not use evilrng** for real world
+//! evilrng provides a unsecure source of cryptographical secure
+//! random number and is written by an amateur for the sole purpose
+//! that he learns a bit about cryptography.  It is very probably
+//! *very* vulnerable, so **do not use evilrng** for real world
 //! cryptographical purposes, but if you're just looking for a way to
 //! get non obvious pattern based numbers and want to make sure that
-//! your programme won't work on windows or will be not-GPL, you
-//! actually may use this one evil\* crate.
+//! your programme won't be non-GPL, you actually may use this one
+//! evil\* crate.
+//!
+//! **Note**: Since a recent update evilrng does not anymore rely on
+//! `/dev/urandom` to get entropy, but uses an own **algorithm I have
+//! designed myself**.  This is own crypto and so it's quite probable
+//! that evilrng is **even on the algorithm level broken**.  The
+//! advantage is that now all cryptographical code in or used by the
+//! evil\* crates is fully written by me, what is exactly the goal.
 
-use std::fs::File;
-use std::io::{self, Read};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, SystemTimeError};
+
+use evilsha::{sha_2, ShaHash, ShaVersion};
+
+// If a new RngSource is created while there is already one the new
+// one could use a bit of the entropy of the old one to better
+// bootstrap.  This is just a mitigation.
+static BOOTSTRAPING: AtomicU32 = AtomicU32::new(0);
 
 /// Provides cryptographical unsecure random numbers
 #[derive(Debug)]
 pub struct RngSource
 {
-    entropy: [u8; 256],
+    entropy: [u8; 64],
+    newentropy: Vec<u8>,
     used: usize,
+    fresh: u8,
 }
 
 impl Drop for RngSource
 {
     fn drop(&mut self) {}
+}
+
+impl Default for RngSource
+{
+    fn default() -> Self
+    {
+        Self::new()
+    }
 }
 
 impl RngSource
@@ -68,70 +92,59 @@ impl RngSource
     ///
     /// Creates a new unsecure random number source.  **Do not use for
     /// cryptography.**
-    ///
-    /// # Errors
-    /// It returns an error if it couldn't be read from `/dev/urandom`
-    pub fn new() -> Result<Self, io::Error>
+    #[must_use]
+    pub fn new() -> Self
     {
         let mut rv = Self {
-            entropy: [
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0,
-            ],
+            entropy: [0; 64],
+            newentropy: vec![],
             used: 256,
+            fresh: 255,
         };
 
-        rv.fill()?;
+        rv.add_new_entropy();
+        rv.fill();
 
-        Ok(rv)
+        rv
     }
 
     /// Gets unsecure random numbers
     ///
     /// Uses the available or newly loaded entropy to get a [`u8`].
     /// This is **not** the **cryptographical** secure type of random!
-    ///
-    /// # Errors
-    /// It returns an error if not enough entropy was stored and
-    /// getting additional entropy failed.
-    pub fn get_u8(&mut self) -> Result<u8, io::Error>
+    pub fn get_u8(&mut self) -> u8
     {
-        if self.used + 1 > 256
+        self.add_new_entropy();
+        if self.used + 1 > 64
         {
-            self.fill()?;
+            self.fill();
+        }
+        else
+        {
+            self.handle_fresh();
         }
 
         let rv = self.entropy[self.used];
 
         self.used += 1;
 
-        Ok(rv)
+        rv
     }
 
     /// Gets unsecure random numbers
     ///
     /// Uses the available or newly loaded entropy to get a [`u32`].
     /// This is **not** the **cryptographical** secure type of random!
-    ///
-    /// # Errors
-    /// It returns an error if not enough entropy was stored and
-    /// getting additional entropy failed.
-    pub fn get_u32(&mut self) -> Result<u32, io::Error>
+    pub fn get_u32(&mut self) -> u32
     {
-        if self.used + 4 > 256
+        self.add_new_entropy();
+        if self.used + 4 > 64
         {
-            self.fill()?;
+            self.fill();
+        }
+        else
+        {
+            self.handle_fresh();
         }
 
         let rv = (u32::from(self.entropy[self.used]) << 24)
@@ -141,17 +154,89 @@ impl RngSource
 
         self.used += 4;
 
-        Ok(rv)
+        rv
     }
 
-    fn fill(&mut self) -> Result<(), io::Error>
+    /// Adds own entropy
+    ///
+    /// [`RngSource`] usually uses time measurements for entropy, but
+    /// that approach has limits, so if you have own entropy you can
+    /// add it here and by that improve the quality of random numbers
+    /// returned by `RngSource`s.  Bad entropy (even constant zero or
+    /// attacker-provided one) should not reduce the quality, but even
+    /// without that you should **consider `RngSource` broken!**
+    pub fn add_entropy(&mut self, mut entropy: Vec<u8>)
     {
-        let mut fp = File::open("/dev/urandom")?;
+        self.newentropy.append(&mut entropy);
+        self.fill();
+        self.bootstrap();
+    }
 
-        fp.read_exact(&mut self.entropy[0..self.used])?;
+    fn handle_fresh(&mut self)
+    {
+        if self.fresh != 0
+        {
+            self.fill();
+            self.fresh -= 1;
 
-        self.used = 0;
+            if self.fresh == 0
+            {
+                self.bootstrap();
+            }
+        }
+    }
 
-        Ok(())
+    fn bootstrap(&mut self)
+    {
+        BOOTSTRAPING.store(
+            BOOTSTRAPING.load(Ordering::SeqCst) ^ self.get_u32(),
+            Ordering::SeqCst,
+        );
+    }
+
+    fn add_new_entropy(&mut self)
+    {
+        // Needed since there is no to me known way to avoid it on a
+        // other way.
+        #[allow(clippy::cast_possible_truncation)]
+        fn handle_error(val: &mut RngSource) -> Result<(), SystemTimeError>
+        {
+            let start = SystemTime::now();
+            val.newentropy.push(
+                (SystemTime::now().duration_since(start)?.as_nanos() % 256)
+                    as u8,
+            );
+            val.newentropy.push(
+                (SystemTime::UNIX_EPOCH.duration_since(start)?.as_nanos()
+                    % 256) as u8,
+            );
+
+            Ok(())
+        }
+
+        if handle_error(self).is_err()
+        {
+            self.newentropy.push(255);
+            self.newentropy.push(0);
+            self.newentropy.push(255);
+        }
+    }
+
+    fn fill(&mut self)
+    {
+        match sha_2(&self.newentropy, ShaVersion::Sha512)
+        {
+            ShaHash::Sha512(x) =>
+            {
+                self.entropy = x;
+                self.used = 0;
+                self.newentropy.clear();
+                for v in x
+                {
+                    self.newentropy.push(v);
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 }
