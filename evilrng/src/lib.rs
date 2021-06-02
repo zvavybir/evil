@@ -53,19 +53,22 @@
 //! advantage is that now all cryptographical code in or used by the
 //! evil\* crates is fully written by me, what is exactly the goal.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::mem;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{SystemTime, SystemTimeError};
 
 use evilsha::{sha_2, ShaHash, ShaVersion};
 
-// If a new RngSource is created while there is already one the new
-// one could use a bit of the entropy of the old one to better
-// bootstrap.  This is just a mitigation.
-static BOOTSTRAPING: AtomicU32 = AtomicU32::new(0);
+static RNG_LOCKED: AtomicBool = AtomicBool::new(false);
+static mut RNG_SOURCE: Option<InnerRngSource> = None;
 
-/// Provides cryptographical unsecure random numbers
+/// Provides unsecure cryptographical secure random numbers
+#[derive(Copy, Clone, Debug)]
+pub struct RngSource;
+
 #[derive(Debug)]
-pub struct RngSource
+struct InnerRngSource
 {
     entropy: [u8; 64],
     newentropy: Vec<u8>,
@@ -73,46 +76,79 @@ pub struct RngSource
     fresh: u8,
 }
 
-impl Drop for RngSource
-{
-    fn drop(&mut self) {}
-}
-
 impl Default for RngSource
 {
     fn default() -> Self
     {
-        Self::new()
+        Self
     }
 }
 
-impl RngSource
+impl Drop for InnerRngSource
 {
-    /// Creates a new unsecure random number source
-    ///
-    /// Creates a new unsecure random number source.  **Do not use for
-    /// cryptography.**
-    #[must_use]
-    pub fn new() -> Self
+    #[allow(unsafe_code)]
+    fn drop(&mut self)
     {
-        let mut rv = Self {
+        // As far as I know always true, but this is my first time
+        // working with atomics, so I'm a bit cautios.
+        debug_assert!(RNG_LOCKED.load(Ordering::SeqCst));
+
+        let replacer = Self {
             entropy: [0; 64],
             newentropy: vec![],
-            used: 256,
-            fresh: 255,
+            used: 0,
+            fresh: 0,
         };
 
-        rv.add_new_entropy();
-        rv.fill();
+        // SAFETY: There can always only be one `InnerRngSource`, so
+        // we must have the lock.
+        unsafe {
+            RNG_SOURCE = Some(mem::replace(self, replacer));
+        }
 
-        rv
+        RNG_LOCKED.store(false, Ordering::SeqCst);
+    }
+}
+
+impl InnerRngSource
+{
+    #[allow(unsafe_code)]
+    fn get() -> Self
+    {
+        while RNG_LOCKED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            thread::yield_now();
+        }
+
+        // As far as I know always true, but this is my first time
+        // working with atomics, so I'm a bit cautios.
+        debug_assert!(RNG_LOCKED.load(Ordering::SeqCst));
+
+        // SAFETY: The lock was successfully acquired, so this is the
+        // only point that accesses `RNG_SOURCE`.
+        if let Some(x) = unsafe { mem::take(&mut RNG_SOURCE) }
+        {
+            x
+        }
+        else
+        {
+            let mut rv = Self {
+                entropy: [0; 64],
+                newentropy: vec![],
+                used: 256,
+                fresh: 255,
+            };
+
+            rv.add_new_entropy();
+            rv.fill();
+
+            rv
+        }
     }
 
-    /// Gets unsecure random numbers
-    ///
-    /// Uses the available or newly loaded entropy to get a [`u8`].
-    /// This is **not** the **cryptographical** secure type of random!
-    pub fn get_u8(&mut self) -> u8
+    fn get_u8(&mut self) -> u8
     {
         self.add_new_entropy();
         if self.used + 1 > 64
@@ -131,11 +167,7 @@ impl RngSource
         rv
     }
 
-    /// Gets unsecure random numbers
-    ///
-    /// Uses the available or newly loaded entropy to get a [`u32`].
-    /// This is **not** the **cryptographical** secure type of random!
-    pub fn get_u32(&mut self) -> u32
+    fn get_u32(&mut self) -> u32
     {
         self.add_new_entropy();
         if self.used + 4 > 64
@@ -157,19 +189,11 @@ impl RngSource
         rv
     }
 
-    /// Adds own entropy
-    ///
-    /// [`RngSource`] usually uses time measurements for entropy, but
-    /// that approach has limits, so if you have own entropy you can
-    /// add it here and by that improve the quality of random numbers
-    /// returned by `RngSource`s.  Bad entropy (even constant zero or
-    /// attacker-provided one) should not reduce the quality, but even
-    /// without that you should **consider `RngSource` broken!**
-    pub fn add_entropy(&mut self, mut entropy: Vec<u8>)
+    fn add_entropy(&mut self, mut entropy: Vec<u8>)
     {
+        self.add_new_entropy();
         self.newentropy.append(&mut entropy);
         self.fill();
-        self.bootstrap();
     }
 
     fn handle_fresh(&mut self)
@@ -178,28 +202,16 @@ impl RngSource
         {
             self.fill();
             self.fresh -= 1;
-
-            if self.fresh == 0
-            {
-                self.bootstrap();
-            }
         }
-    }
-
-    fn bootstrap(&mut self)
-    {
-        BOOTSTRAPING.store(
-            BOOTSTRAPING.load(Ordering::SeqCst) ^ self.get_u32(),
-            Ordering::SeqCst,
-        );
     }
 
     fn add_new_entropy(&mut self)
     {
-        // Needed since there is no to me known way to avoid it on a
-        // other way.
+        // Needed since there is no way known to me to avoid it.
         #[allow(clippy::cast_possible_truncation)]
-        fn handle_error(val: &mut RngSource) -> Result<(), SystemTimeError>
+        fn handle_error(
+            val: &mut InnerRngSource,
+        ) -> Result<(), SystemTimeError>
         {
             let start = SystemTime::now();
             val.newentropy.push(
@@ -216,9 +228,9 @@ impl RngSource
 
         if handle_error(self).is_err()
         {
-            self.newentropy.push(255);
-            self.newentropy.push(0);
-            self.newentropy.push(255);
+            self.newentropy.push(31);
+            self.newentropy.push(41);
+            self.newentropy.push(59);
         }
     }
 
@@ -237,6 +249,67 @@ impl RngSource
                 }
             }
             _ => unreachable!(),
+        }
+    }
+}
+
+impl RngSource
+{
+    /// Gets unsecure random numbers
+    ///
+    /// Uses the available or newly loaded entropy to get a [`u8`].
+    /// This is **not** the **cryptographical** secure type of random!
+    #[must_use]
+    pub fn get_u8(self) -> u8
+    {
+        let _ = self;
+        InnerRngSource::get().get_u8()
+    }
+
+    /// Gets unsecure random numbers
+    ///
+    /// Uses the available or newly loaded entropy to get a [`u32`].
+    /// This is **not** the **cryptographical** secure type of random!
+    #[must_use]
+    pub fn get_u32(self) -> u32
+    {
+        let _ = self;
+        InnerRngSource::get().get_u32()
+    }
+
+    /// Adds own entropy
+    ///
+    /// [`InnerRngSource`] usually uses time measurements for entropy, but
+    /// that approach has limits, so if you have own entropy you can
+    /// add it here and by that improve the quality of random numbers
+    /// returned by `InnerRngSource`s.  Bad entropy (even constant zero or
+    /// attacker-provided one) should not reduce the quality, but even
+    /// without that you should **consider `InnerRngSource` broken!**
+    pub fn add_entropy(self, entropy: Vec<u8>)
+    {
+        let _ = self;
+        InnerRngSource::get().add_entropy(entropy)
+    }
+}
+
+#[cfg(test)]
+mod tests
+{
+    use super::RngSource;
+
+    #[test]
+    fn rng_test()
+    {
+        // We can't check on specific values, only that it doesn't panic
+        for _ in 0..1000
+        {
+            let rng = RngSource;
+
+            let _ = rng.get_u8();
+            let _ = rng.get_u32();
+            rng.add_entropy((0..100).map(|_| rng.get_u8()).collect());
+            let _ = rng.get_u8();
+            let _ = rng.get_u32();
         }
     }
 }
